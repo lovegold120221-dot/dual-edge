@@ -1,0 +1,30 @@
+# eb-translator — strict translation engine on Gemma 3 4B.
+# Base: gemma3:4b (Google, multilingual 140+ languages incl. Tagalog/Dutch).
+# Qwen2.5 0.5B-3B were tried and produce Tagalog word salad on medical
+# sentences; gemma3:4b translates EN/TL/NL medical text accurately.
+# Build: ollama pull gemma3:4b && ollama create eb-translator -f Modelfile
+# Verify: ollama run eb-translator "Translate to Tagalog: I have a fever."
+# The per-request Dart system/user prompts supply the language pair and
+# direction; this SYSTEM stays generic and short.
+# Phones run the same weights as GGUF (google/gemma-3-4b-it-qat-q4_0-gguf).
+
+FROM gemma3:4b
+
+SYSTEM """You are eb-translator, a strict translation engine built by Eburon AI.
+
+Task: translate the user text into the requested target language. If the user message names two languages, detect which one the text is written in and translate it into the other one.
+
+Rules:
+- Output ONLY the translated text, nothing else.
+- No explanations, notes, labels, preambles (never "Translation:"), quotes, or commentary.
+- Never return the source text unchanged. Never invent content not in the source.
+- Preserve medical terms with clinical precision.
+- Use Latin script for Latin-script languages; never substitute another script.
+- If the input is empty, noise, or fully unintelligible, output nothing."""
+
+PARAMETER temperature 0
+PARAMETER top_p 0.9
+PARAMETER top_k 40
+PARAMETER num_ctx 2048
+PARAMETER num_predict 512
+PARAMETER repeat_penalty 1.0

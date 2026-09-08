@@ -1,0 +1,11 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "ai.eburon.translator",
+      "sha256_cert_fingerprints":
+        ["F3:33:0B:DE:DA:CB:FB:9E:96:C3:C3:48:32:A2:B3:C9:43:59:ED:2C:0D:D0:0A:AB:38:95:3F:04:23:E3:38:39"]
+    }
+  }
+]
