@@ -185,9 +185,11 @@ class OnDeviceLlmService {
 
   /// Single-turn completion with the eb-translator system prompt.
   /// Returns the raw assistant text (callers sanitize).
+  /// [temperature] overrides the deterministic default (repair retries).
   Future<String?> complete({
     required String system,
     required String user,
+    double? temperature,
   }) async {
     if (!isSupported) {
       _lastError = 'On-device inference is only available on Android/iOS';
@@ -216,8 +218,8 @@ class OnDeviceLlmService {
       final buffer = StringBuffer();
       final stream = session.chat(
         <ChatMessage>[ChatMessage.system(system), ChatMessage.user(user)],
-        params: const SamplingParams(
-          temperature: EbTranslatorPrompt.temperature,
+        params: SamplingParams(
+          temperature: temperature ?? EbTranslatorPrompt.temperature,
           topP: EbTranslatorPrompt.topP,
           topK: EbTranslatorPrompt.topK,
           maxTokens: EbTranslatorPrompt.maxTokens,

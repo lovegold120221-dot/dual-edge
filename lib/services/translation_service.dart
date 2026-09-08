@@ -12,6 +12,11 @@ import 'output_language_validator.dart';
 /// Which inference backend handles a translation request.
 enum LlmBackend { ollama, onDevice }
 
+/// Translation output with an optional guest-switch signal.
+/// [guestLanguage] is the display name from a `[GUEST=...]` tag ('' when the
+/// pairing is unchanged).
+typedef TurnResult = ({String? text, String guestLanguage});
+
 class TranslationService {
   TranslationService({required this.config, OnDeviceLlmService? onDevice})
     : _onDeviceOverride = onDevice;
@@ -91,10 +96,11 @@ class TranslationService {
   ///
   /// The final text is validated to actually be [targetLanguage] (never an
   /// echo of the source, never a foreign script, never source-language
-  /// wording). A failed validation returns null so wrong-language text can
-  /// never reach history or TTS.
+  /// wording, never garbled). Cascade on failure: polished → stage-1 →
+  /// one fresh-sampling retry → null. A null return means nothing speakable
+  /// was produced; errors are never spoken, and the flow never asks the user.
   /// [forceOnDevice] is test-only backend selection.
-  Future<String?> translateTurn({
+  Future<TurnResult> translateTurn({
     required String sourceText,
     required String sourceLanguage,
     required String targetLanguage,
@@ -103,24 +109,61 @@ class TranslationService {
     String? model,
     bool? forceOnDevice,
   }) async {
+    const none = (text: null, guestLanguage: '');
     final text = sourceText.trim();
-    if (text.isEmpty) return null;
+    if (text.isEmpty) return none;
 
     final onDevice = useOnDevice(overrideOnDevice: forceOnDevice);
     final system = (systemPrompt != null && systemPrompt.trim().isNotEmpty)
         ? systemPrompt.trim()
         : EbTranslatorPrompt.system();
 
-    Future<String?> requestOnce(String prompt) async {
+    // Stage-1 pins the direction in the system message too: under a long
+    // doctrine prompt the model follows system-level orders most reliably.
+    // Polish always uses the short system: the pairing doctrine would
+    // otherwise re-translate instead of rewriting.
+    final stage1System =
+        '$system\nTHIS TURN: translate $sourceLanguage to '
+        '$targetLanguage. Output the translation (with guest tag line '
+        'first if the pairing changed).';
+
+    Future<({String? text, String guest})?> requestTagged(
+      String prompt, {
+      double? temperature,
+      String? systemOverride,
+    }) async {
+      final effectiveSystem = systemOverride ?? system;
       final raw = onDevice
-          ? await _requestOnDeviceRaw(prompt, system: system)
+          ? await _requestOnDeviceRaw(
+              prompt,
+              system: effectiveSystem,
+              temperature: temperature,
+            )
           : await _requestOllamaRaw(
               prompt,
-              system: system,
+              system: effectiveSystem,
               modelName: resolveModel(model),
+              temperature: temperature,
             );
       if (raw == null || raw.trim().isEmpty) return null;
-      return sanitizeTranslation(raw);
+      final tagged = EbTranslatorPrompt.extractGuestTag(raw);
+      if (tagged.guest.isEmpty) {
+        return (text: sanitizeTranslation(tagged.text), guest: '');
+      }
+      return (text: sanitizeTranslation(tagged.text), guest: tagged.guest);
+    }
+
+    Future<String?> requestOnce(
+      String prompt, {
+      double? temperature,
+      String? systemOverride,
+    }) async {
+      final tagged = await requestTagged(
+        prompt,
+        temperature: temperature,
+        systemOverride: systemOverride,
+      );
+      return tagged?.text;
     }
 
     bool valid(String candidate) => OutputLanguageValidator.matchesTarget(
@@ -133,38 +176,68 @@ class TranslationService {
       ),
     );
 
-    final first = await requestOnce(
-      EbTranslatorPrompt.directed(
-        text: text,
-        sourceLanguage: sourceLanguage,
-        targetLanguage: targetLanguage,
-        context: context,
-      ),
-    );
-    if (first == null || first.isEmpty) return null;
-
-    final polished = await requestOnce(
-      EbTranslatorPrompt.polishRewrite(
-        text: first,
-        targetLanguage: targetLanguage,
-      ),
-    );
-    final candidate = (polished == null || polished.isEmpty) ? first : polished;
-    if (!valid(candidate)) {
-      _lastError =
-          'Output failed language validation (expected $targetLanguage)';
+    Future<TurnResult?> attempt({double? temperature}) async {
+      final first = await requestTagged(
+        EbTranslatorPrompt.directed(
+          text: text,
+          sourceLanguage: sourceLanguage,
+          targetLanguage: targetLanguage,
+          context: context,
+        ),
+        temperature: temperature,
+        systemOverride: stage1System,
+      );
+      if (first == null || first.text == null || first.text!.isEmpty) {
+        return null;
+      }
+      final guest = first.guest;
+      final polished = await requestOnce(
+        EbTranslatorPrompt.polishRewrite(
+          text: first.text!,
+          targetLanguage: targetLanguage,
+        ),
+        temperature: temperature,
+        systemOverride: EbTranslatorPrompt.system(),
+      );
+      final candidate = (polished == null || polished.isEmpty)
+          ? first.text!
+          : polished;
+      // Best valid wins: polished, else the stage-1 text when it validates.
+      if (valid(candidate)) return (text: candidate, guestLanguage: guest);
+      if (candidate != first.text && valid(first.text!)) {
+        return (text: first.text, guestLanguage: guest);
+      }
       return null;
     }
-    _lastError = null;
-    return candidate;
+
+    // Best-valid cascade: polished, then stage-1 is already inside attempt;
+    // on total failure retry once with fresh sampling before giving up.
+    final result = await attempt();
+    if (result != null) {
+      _lastError = null;
+      return result;
+    }
+    final retry = await attempt(temperature: 0.3);
+    if (retry != null) {
+      _lastError = null;
+      return retry;
+    }
+    _lastError ??=
+        'Output failed language validation (expected $targetLanguage)';
+    return none;
   }
 
   /// Raw model text for [prompt] (unsanitized; split/parse first).
   Future<String?> _requestOnDeviceRaw(
     String prompt, {
     required String system,
+    double? temperature,
   }) async {
-    final raw = await onDeviceService.complete(system: system, user: prompt);
+    final raw = await onDeviceService.complete(
+      system: system,
+      user: prompt,
+      temperature: temperature,
+    );
     if (raw == null || raw.trim().isEmpty) {
       _lastError = onDeviceService.lastError ?? 'On-device translation failed';
       return null;
@@ -178,13 +251,14 @@ class TranslationService {
     String prompt, {
     required String system,
     required String modelName,
+    double? temperature,
   }) async {
     final body = <String, dynamic>{
       'model': modelName,
       'stream': false,
       // Deterministic decoding to match the eb-translator Modelfile.
       'options': <String, dynamic>{
-        'temperature': EbTranslatorPrompt.temperature,
+        'temperature': temperature ?? EbTranslatorPrompt.temperature,
         'top_p': EbTranslatorPrompt.topP,
         'top_k': EbTranslatorPrompt.topK,
         'num_ctx': EbTranslatorPrompt.contextSize,

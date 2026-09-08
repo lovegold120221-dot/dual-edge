@@ -9,7 +9,6 @@ class AppConfig {
     this.kokoroTtsUrl = 'http://127.0.0.1:8880',
     this.onDeviceModelUrl = EbTranslatorPrompt.defaultGgufUrl,
     this.sttVariant = SherpaSpeechAssets.defaultSttVariant,
-    this.googleServerClientId = '',
   });
 
   /// Local Ollama model used for translation on desktop.
@@ -40,10 +39,6 @@ class AppConfig {
         'SHERPA_STT_VARIANT',
         defaultValue: SherpaSpeechAssets.defaultSttVariant,
       ),
-      googleServerClientId: String.fromEnvironment(
-        'GOOGLE_SERVER_CLIENT_ID',
-        defaultValue: '',
-      ),
     );
   }
 
@@ -56,10 +51,6 @@ class AppConfig {
 
   /// Raw sherpa whisper variant (tiny|base); use [resolvedSttVariant].
   final String sttVariant;
-
-  /// OAuth web client ID used as the audience for Google Sign-In ID tokens
-  /// on Android. Empty disables native Google sign-in with a clear error.
-  final String googleServerClientId;
 
   /// Normalized whisper variant for phones.
   String get resolvedSttVariant =>

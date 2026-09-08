@@ -37,12 +37,17 @@ class ModelDownloadProgress {
 /// Files land atomically (`*.partial` → rename) under Application
 /// Support/models so interrupted downloads resume instead of restarting.
 class LocalModelStore {
-  LocalModelStore({this._client});
+  LocalModelStore({this._client, this._baseDir});
 
   HttpClient? _client;
+  final Directory? _baseDir;
   bool _closed = false;
 
   Future<Directory> modelsDir() async {
+    if (_baseDir != null) {
+      await _baseDir.create(recursive: true);
+      return _baseDir;
+    }
     final support = await getApplicationSupportDirectory();
     final dir = Directory('${support.path}/models');
     await dir.create(recursive: true);
@@ -70,6 +75,15 @@ class LocalModelStore {
       if (!await isPresent(file)) return false;
     }
     return true;
+  }
+
+  /// Raw file presence (no size validation) for markers and data files.
+  Future<bool> isFilePresent(String relativePath) async {
+    try {
+      return await File('${(await modelsDir()).path}/$relativePath').exists();
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Download every missing file, emitting aggregate progress.
@@ -184,6 +198,15 @@ class LocalModelStore {
     if (response.statusCode != HttpStatus.ok &&
         response.statusCode != HttpStatus.partialContent) {
       await response.drain<void>();
+      // Stale partial beyond EOF (or rejected resume): drop it and retry
+      // fresh once. The retry sees no partial, so this cannot loop.
+      if (offset > 0) {
+        try {
+          if (await partial.exists()) await partial.delete();
+        } catch (_) {}
+        yield* _downloadOne(ref, index, count);
+        return;
+      }
       throw HttpException(
         'Download failed (${response.statusCode}): ${ref.url}',
       );

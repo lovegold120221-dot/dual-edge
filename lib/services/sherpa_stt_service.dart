@@ -117,12 +117,6 @@ class SherpaSttService implements SttBackend {
         defaultTargetPlatform == TargetPlatform.iOS;
   }
 
-  /// ~3.75s of 16 kHz mono PCM16 (bytes), mirroring SttService.
-  static const int bufferSizeBytes = 120000;
-
-  /// ~0.5s of previous PCM kept for continuity across chunk boundaries.
-  static const int overlapBytes = 16000;
-
   bool _initialized = false;
   bool _downloading = false;
   bool _transcribing = false;
@@ -136,9 +130,8 @@ class SherpaSttService implements SttBackend {
   SherpaWorker? _worker;
   StreamSubscription<ModelDownloadProgress>? _downloadSubscription;
 
-  final List<int> _pcmBuffer = <int>[];
-  final List<List<int>> _pendingChunks = <List<int>>[];
-  List<int> _overlapTail = <int>[];
+  final List<({List<int> pcm, bool isFinal})> _pendingChunks =
+      <({List<int> pcm, bool isFinal})>[];
 
   final _onTranscription = StreamController<SttTranscript>.broadcast();
   @override
@@ -265,43 +258,26 @@ class SherpaSttService implements SttBackend {
   }
 
   @override
-  void feedPcmChunk(List<int> chunk) {
-    if (!_initialized || _worker == null || chunk.isEmpty) return;
-    _pcmBuffer.addAll(chunk);
-    while (_pcmBuffer.length >= bufferSizeBytes) {
-      final slice = List<int>.from(_pcmBuffer.sublist(0, bufferSizeBytes));
-      _pcmBuffer.removeRange(0, bufferSizeBytes);
-      _enqueue(slice);
-    }
-  }
-
-  void _enqueue(List<int> pcmBytes) {
+  void transcribeUtterance(List<int> pcmBytes, {bool isFinal = true}) {
+    if (!_initialized || _worker == null || pcmBytes.isEmpty) return;
     if (_transcribing) {
-      _pendingChunks.add(pcmBytes);
+      _pendingChunks.add((pcm: List<int>.from(pcmBytes), isFinal: isFinal));
       while (_pendingChunks.length > 3) {
         _pendingChunks.removeAt(0);
       }
       return;
     }
-    unawaited(_transcribeBytes(pcmBytes));
+    unawaited(_transcribeBytes(List<int>.from(pcmBytes), isFinal: isFinal));
   }
 
-  Future<void> _transcribeBytes(List<int> pcmBytes) async {
+  Future<void> _transcribeBytes(
+    List<int> pcmBytes, {
+    bool isFinal = true,
+  }) async {
     if (pcmBytes.isEmpty || _worker == null) return;
     _transcribing = true;
     try {
-      List<int> withOverlap = pcmBytes;
-      if (_overlapTail.isNotEmpty) {
-        withOverlap = <int>[..._overlapTail, ...pcmBytes];
-      }
-      if (pcmBytes.length >= overlapBytes) {
-        _overlapTail = List<int>.from(
-          pcmBytes.sublist(pcmBytes.length - overlapBytes),
-        );
-      } else {
-        _overlapTail = List<int>.from(pcmBytes);
-      }
-
+      // VAD delivers complete padded utterances; no overlap stitching needed.
       if (TranscriptionFilters.isNearSilence(pcmBytes)) {
         if (kDebugMode) {
           debugPrint('SherpaSttService: silence gate — skip decode');
@@ -309,7 +285,7 @@ class SherpaSttService implements SttBackend {
         return;
       }
 
-      final samples = TranscriptionFilters.pcm16ToFloat(withOverlap);
+      final samples = TranscriptionFilters.pcm16ToFloat(pcmBytes);
       final reply = await _worker!.callOnce('decode', <String, Object?>{
         'samples': samples,
       });
@@ -322,6 +298,7 @@ class SherpaSttService implements SttBackend {
         _onTranscription.add((
           text: text,
           languageCode: reply['lang']?.toString() ?? '',
+          isFinal: isFinal,
         ));
       }
     } catch (e) {
@@ -336,23 +313,19 @@ class SherpaSttService implements SttBackend {
       _transcribing = false;
       if (_pendingChunks.isNotEmpty) {
         final next = _pendingChunks.removeAt(0);
-        unawaited(_transcribeBytes(next));
+        unawaited(_transcribeBytes(next.pcm, isFinal: next.isFinal));
       }
     }
   }
 
   @override
   void reset() {
-    _pcmBuffer.clear();
     _pendingChunks.clear();
-    _overlapTail = <int>[];
   }
 
   @override
   void dispose() {
-    _pcmBuffer.clear();
     _pendingChunks.clear();
-    _overlapTail = <int>[];
     _downloadSubscription?.cancel();
     _downloadSubscription = null;
     _worker?.dispose();

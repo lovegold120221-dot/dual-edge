@@ -8,19 +8,18 @@ Display name: **Dual Translate**. Application id / bundle id:
 This is a real-time dual-language **voice** translator for conversations
 between staff (default: Dutch/Flemish) and a guest speaker. It is aimed at
 live interpretation, with medical consultation as the default mode. The
-Flutter app keeps the product’s working boundaries rather than only copying
-the web UI: Gemini Live over WebSocket, native full-duplex PCM audio, Firebase
-Authentication, per-user Firestore history, and device-persisted settings.
+Flutter app is fully local and account-free: on-device LLM translation,
+sherpa speech recognition and synthesis, native full-duplex PCM audio, and
+device-persisted settings and history.
 
 Requires Flutter **3.44+** (Dart **^3.12.2**). The checkout was last built
 with Flutter 3.44.6 / Dart 3.12.2.
 
 ## What it does
 
-- Sign in with email/password, create an account, reset password, or continue
-  with Google. Auth state gates the translator. A Super Admin badge is shown
-  for a small hardcoded email allowlist; there is no in-app admin dashboard.
-- After sign-in, a dark Material 3 translator: conversation transcript, LIVE
+- No accounts, no sign-in: the translator opens directly and works fully
+  offline after the one-time model downloads.
+- A dark Material 3 translator: conversation transcript, LIVE
   badge, settings drawer, mic visualizer, and a control tray (mic mute, speaker
   mute, session reset, play/pause).
 - Gemini Live (`gemini-3.1-flash-live-preview` by default) streams 16 kHz mono
@@ -32,9 +31,8 @@ with Flutter 3.44.6 / Dart 3.12.2.
   `setGuestLanguage` tool updates Language 2 when a new non-Dutch language is
   detected. Auto-detect, full language/voice menus, medical vs. general mode,
   topic-aware prompt generation, and medical terminology lists are included.
-- Settings and history persist on device (`shared_preferences`). Completed
-  turns also sync to Firestore `users/{uid}/translations`. PDF share of
-  history. Eburon emblem on launcher icons, auth, header, and empty session.
+- Settings and history persist on device (`shared_preferences`). PDF share of
+  history. Eburon emblem on launcher icons, header, and empty session.
 
 The conversation UI is a single scrolling transcript (input left, translation
 right), not a split dual-pane editor.
@@ -43,36 +41,28 @@ right), not a split dual-pane editor.
 
 ```text
 lib/
-  main.dart             Firebase.initializeApp + AppController
-  app.dart              MaterialApp; loading → config/auth/translator
-  firebase_options.dart FlutterFire options (android / ios / web)
+  main.dart             AppController bootstrap (no accounts, no backends)
+  app.dart              MaterialApp; loading → translator
   core/                 dart-define AppConfig + dark Material theme
   data/                 languages, voices, prompts, models
-  services/             Firebase, Gemini Live, PCM audio, echo guard,
+  services/             on-device LLM/STT/TTS, PCM audio, echo guard,
                         preferences, PDF export
   state/                AppController orchestration
-  ui/                   auth, configuration, translator, settings drawer,
-                        conversation + mic widgets
+  ui/                   translator, settings drawer, conversation + mic widgets
 android/app/src/main/kotlin/ai/eburon/dualtranslate/
                         AudioRecord/AudioTrack duplex bridge
-ios/Runner/             AVAudioEngine duplex bridge + OAuth inject script
+ios/Runner/             AVAudioEngine duplex bridge
 assets/branding/        app_logo.png (Eburon emblem)
 test/                   unit + widget tests
 integration_test/       native duplex audio on a device
-tool/                   Gemini Live / transcription / Firebase smoke scripts
+tool/                   Gemini Live / transcription smoke scripts
 config.example.json     dart-define template (copy to config.local.json)
 ```
 
 Routing is not named-route based. `DualTranslateApp` picks the home screen:
 
-1. Loading while auth initializes
-2. `ConfigurationScreen` if Firebase failed to become ready
-3. `AuthScreen` if there is no signed-in user
-4. `TranslatorScreen` otherwise
-
-A missing `GEMINI_API_KEY` does **not** block auth. After sign-in the
-translator shows a banner and refuses to connect until the key is baked in
-via `--dart-define-from-file`.
+1. Loading while services initialize
+2. `TranslatorScreen` — always, no account gate
 
 ## How translation works
 
@@ -80,7 +70,11 @@ Defaults (see `TranslationSettings`): staff language **Dutch (Flemish)**,
 guest language **English (US)**, voice **Male**, topic
 **Medical Consultation**, medical mode and auto-detect **on**. The AI Voice
 setting is Male/Female and selects the Supertonic speaker (male ≈ 122 Hz
-default); per-language Piper/MMS voices are single-voice models.
+default). Per-language Piper voices use pitch-verified male voices where a
+male bundle exists (Basque, Icelandic, Malayalam, Nepali, and others);
+Catalan, Kurdish, and Luxembourgish have no male Piper bundle, MMS voices
+are fixed single voices, and Chinese falls back to Supertonic English —
+no local male voice exists for those yet.
 
 With **auto-detect on**, the speaker may use *any* language not just the
 pair: the speech recognizer identifies the spoken language per turn
@@ -95,14 +89,20 @@ Every turn runs fully automatically (never asks, never stalls):
 
 `Mic → STT (+language ID) → translate meaning → fluency polish → language gate → TTS scrub → voice`
 
-- **STT**: whisper with silence gating, hallucination/script/bracket filters
+- **STT**: Silero VAD segments speech into complete utterances (never
+  cut words, silence never decoded) with whisper language ID, silence
+  gating, and hallucination/script/bracket filters. Only finalized
+  utterances translate — partials are held (max-speech cuts accumulate
+  until the utterance ends), never sent to the engine
 - **Translate**: explicit-direction meaning transfer with the last
   exchanges as context (pronouns, terms, tone, repair)
 - **Polish**: rewrite as a fluent native speaker (grammar, idiom, rhythm);
   falls back to stage one on any failure — output is never worse
 - **Language gate**: the final text must provably be the target language
-  (no echo, no foreign script, no source-language wording) or the turn is
-  dropped instead of spoken
+  (no echo, no foreign script, no source-language wording, no looped
+  garble, no length drift) or the turn is dropped instead of spoken
+- **Repair cascade**: polished → stage-one → one fresh-sampling retry →
+  drop with an error (never spoken, never asks the user)
 - **TTS scrub**: deterministic removal of markdown, symbols, emoji, and
   artifacts so only speakable text reaches Supertonic/Piper/MMS
 
@@ -126,37 +126,12 @@ detection. `AppController` finalizes turns (local history + Firestore) after
 `turnComplete`, handles interruption by stopping playback, and mutes mic or
 output independently.
 
-## Auth, Firebase, persistence
+## Persistence (local only, no accounts)
 
-The app uses the **FlutterFire plugins** (`firebase_core`, `firebase_auth`,
-`cloud_firestore`), not the older Identity Toolkit / Realtime Database REST
-client described in earlier drafts.
-
-- Options: `lib/firebase_options.dart` (FlutterFire CLI; project
-  `eburon-bd040`). Do not treat those client keys as server secrets, but do
-  not paste them elsewhere.
-- Native Google files (gitignored): `android/app/google-services.json` and
-  `ios/Runner/GoogleService-Info.plist`. Copy them into place for a fresh
-  checkout. The Android Google Services Gradle plugin is enabled.
-- Auth: email/password sign-in, registration, password reset, Google
-  (native `authenticate()` / web popup). First sign-up writes
-  `users/{uid}`.
-- History: `users/{uid}/translations/{id}` (source, translation, languages,
-  timestamp). Settings merge `language1` / `language2` / `autoDetect` onto
-  the user document. Deployable rules are in `firestore.rules` (owner-only
-  `users/{userId}` and that translations subcollection). `firestore.indexes.json`
-  is empty.
-- Local cache: `shared_preferences` keys `dual_translate_settings` and
-  `translation-history-storage`. Cloud sync failures surface as a banner;
-  the device copy is kept.
-- `tool/smoke_firebase_rest.dart` still probes Authentication + Realtime
-  Database REST and expects `FIREBASE_API_KEY` / `FIREBASE_DATABASE_URL` in
-  a JSON file. That is a leftover connectivity check, not how the running
-  app talks to Firebase.
-
-`firebase.json` records email/password + Google Sign-In for the Eburon
-Translator brand and points at the Firestore rules files. There is no
-Realtime Database usage in Dart.
+- Settings and history live entirely on device (`shared_preferences` keys
+  `dual_translate_settings` and `translation-history-storage`).
+- No sign-in, no cloud sync, no tracking. PDF export shares history
+  directly from the device.
 
 ## Full-duplex audio
 
@@ -189,32 +164,11 @@ cp config.example.json config.local.json
 
 `config.local.json` is gitignored. Fill values locally; never commit them.
 
-Required to **stream**:
+Translation runs fully offline after the one-time model downloads; no API
+keys or accounts are required. Copy `config.example.json` to
+`config.local.json` to override the default Ollama URL, model names, or
+model download URLs (all optional — defaults work out of the box).
 
-| Dart define | Purpose |
-| --- | --- |
-| `GEMINI_API_KEY` | Gemini Live WebSocket key |
-
-Optional, for native Google Sign-In:
-
-| Dart define | Purpose |
-| --- | --- |
-| `GOOGLE_SERVER_CLIENT_ID` | Web OAuth client ID (Android server client ID / ID-token audience) |
-| `GOOGLE_CLIENT_ID` | iOS OAuth client ID |
-| `GOOGLE_IOS_REVERSED_CLIENT_ID` | iOS reversed URL scheme |
-
-Email/password does not need the Google defines. Android Google Sign-In
-fails with `clientConfigurationError` if `GOOGLE_SERVER_CLIENT_ID` is
-empty (`serverClientId must be provided on Android`).
-
-During iOS builds, `ios/Runner/inject_google_oauth_redirect.sh` copies those
-client IDs and the return URL scheme into the built `Info.plist`.
-
-Do not copy a Google OAuth `client_secret*.json` into the client. Only
-client IDs belong in dart-defines.
-
-Firebase is **not** passed through dart-defines anymore. It comes from
-`firebase_options.dart` plus the gitignored Google services files.
 
 ## Run and build
 
@@ -223,7 +177,7 @@ flutter pub get
 flutter run --dart-define-from-file=config.local.json
 ```
 
-Release (pass the same dart-defines so Gemini/Google stay configured):
+Release (pass the same dart-defines so local endpoints stay configured):
 
 ```sh
 flutter build apk --release --dart-define-from-file=config.local.json
@@ -239,8 +193,7 @@ production keystore before distributing an APK or Play bundle.
 
 `web/` only contains Digital Asset Links (`web/well-known/assetlinks.json`).
 There is no Flutter web host (`index.html` / `manifest.json`), so this is
-not a supported `flutter run -d chrome` target even though
-`firebase_options.dart` lists web options.
+not a supported `flutter run -d chrome` target.
 
 ## Tests and smoke checks
 
@@ -264,7 +217,6 @@ Provider smokes (need a real config file; they never print the API key):
 ```sh
 dart run tool/smoke_gemini_live.dart config.local.json
 dart run tool/smoke_realtime_transcription.dart config.local.json <16khz-mono-pcm16>
-dart run tool/smoke_firebase_rest.dart <json-with-FIREBASE_API_KEY-and-DATABASE_URL>
 ```
 
 `smoke_realtime_transcription.dart` streams a 16 kHz mono PCM16 sample
@@ -272,8 +224,7 @@ through Live and requires both input and output transcription events.
 
 Analyzer uses `package:flutter_lints/flutter.yaml`. No coverage threshold.
 
-A real signed-in session still needs enabled Auth providers and deployed
-Firestore rules. Acoustic quality should be checked on the physical phone
+Acoustic quality should be checked on the physical phone
 at the intended speaker volume; simulators cannot reproduce room echo.
 
 ## Production key boundary
@@ -285,18 +236,18 @@ from a trusted backend instead of shipping a long-lived shared key.
 
 ## Dependencies (direct)
 
-`flutter_secure_storage`, `google_sign_in`, `http`, `shared_preferences`,
+`flutter_secure_storage`, `http`, `shared_preferences`,
 `record` (mic permission helper), `web_socket_channel`, `pdf`, `printing`,
-`intl`, `firebase_core`, `firebase_auth`, `cloud_firestore`.
-`flutter_secure_storage` is declared but unused; session state is Firebase
-Auth, not a custom token store.
+`intl`.
+`flutter_secure_storage` is declared but unused.
 
 ## eb-translator model (Ollama + qwen2.5:0.5b)
 
 Translation runs on the local **`eb-translator`** model, built from
-`gemma3:4b` (Google, multilingual incl. Tagalog/Dutch) with a strict
-translation-only system prompt and deterministic decoding (`temperature 0`,
-`top_p 0.9`, `top_k 40`). Qwen2.5 0.5B–3B were tried and produce Tagalog
+`gemma3:4b` (Google, multilingual incl. Tagalog/Dutch) with the STRICT MODE
+system prompt (pure realtime translator doctrine: Dutch/Flemish ↔ latest
+paired guest language, dynamic monitoring, command-ignore, no meta-chat)
+and deterministic decoding (`temperature 0`, `top_p 0.9`, `top_k 40`). Qwen2.5 0.5B–3B were tried and produce Tagalog
 word salad on medical sentences. The definition lives in the repo-root
 `Modelfile`:
 
@@ -343,7 +294,7 @@ flutter build apk --debug   # Android SDK + NDK r28 + CMake 3.22 required
 
 ## On-device speech: STT + TTS (Android / iOS)
 
-Sign-in stays with Firebase Auth — everything else runs from local models:
+Everything runs from local models, no accounts:
 
 | Modality | Desktop | Phone (offline after first fetch) |
 | --- | --- | --- |

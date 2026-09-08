@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 
 import 'core/app_theme.dart';
 import 'state/app_controller.dart';
-import 'ui/auth_screen.dart';
 import 'ui/translator_screen.dart';
 
 class DualTranslateApp extends StatefulWidget {
@@ -40,12 +39,6 @@ class _DualTranslateAppState extends State<DualTranslateApp> {
   Widget _home(AppController controller) {
     if (!controller.initialized) {
       return const _LoadingScreen();
-    }
-    // Firebase-gated platforms (Android/iOS/web) require sign-in for
-    // profiles + synced history. macOS edge builds skip Firebase and go
-    // straight to the local translator.
-    if (controller.firebase.isActive && controller.firebase.user == null) {
-      return AuthScreen(controller: controller);
     }
     return TranslatorScreen(controller: controller);
   }

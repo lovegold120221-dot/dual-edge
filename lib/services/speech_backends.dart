@@ -4,8 +4,10 @@
 // (whisper + Supertonic/Piper, fully offline). [AppController] talks only
 // to these interfaces and picks the implementation by platform.
 
-/// One transcribed chunk with the detected language code ('' when unknown).
-typedef SttTranscript = ({String text, String languageCode});
+/// One transcribed chunk with the detected language code ('' when unknown)
+/// and finality. Only final transcripts may be translated; fragments are
+/// held until the utterance completes.
+typedef SttTranscript = ({String text, String languageCode, bool isFinal});
 
 abstract class SttBackend {
   Stream<SttTranscript> get onTranscription;
@@ -19,7 +21,11 @@ abstract class SttBackend {
 
   Future<void> init();
   void setPreferredLanguage(String? languageOrCode, {bool autoDetect = true});
-  void feedPcmChunk(List<int> chunk);
+
+  /// Transcribe one complete VAD utterance (16 kHz mono PCM16).
+  /// Fire-and-forget: results arrive on [onTranscription].
+  /// [isFinal] is false for max-speech cuts that continue in the next call.
+  void transcribeUtterance(List<int> pcmBytes, {bool isFinal = true});
   void reset();
   void dispose();
 }

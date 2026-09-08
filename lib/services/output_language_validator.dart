@@ -21,6 +21,14 @@ class OutputLanguageValidator {
   /// Minimum hits for a third language to veto the output.
   static const int minThirdLanguageHitsToFail = 3;
 
+  /// Phrase repetitions that mark garbled output (e.g. looped n-grams).
+  static const int minPhraseRepeatsToFail = 3;
+
+  /// Word-count ratios beyond which meaning likely diverged.
+  static const double maxLengthRatio = 4.0;
+  static const double minLengthRatio = 0.25;
+  static const int minWordsForLengthCheck = 4;
+
   /// Common words per Latin-script language (lowercase, matched on words).
   static const Map<String, List<String>> stopwords = <String, List<String>>{
     'en': <String>[
@@ -544,6 +552,9 @@ class OutputLanguageValidator {
   ///
   /// [sourceCode] is the ISO code of the input, [targetScripts] the scripts
   /// the target language pair may produce (Latin always allowed).
+  /// Validation is base-language first: regional variants are never
+  /// distinguished here (that is the localization step's job), and short
+  /// inconclusive texts pass rather than risk blocking real speech.
   static bool matchesTarget({
     required String sourceText,
     required String outputText,
@@ -563,12 +574,11 @@ class OutputLanguageValidator {
       return false;
     }
 
-    // 3. Stopword vote (Latin-script languages only).
-    final words = output
-        .toLowerCase()
-        .split(RegExp(r'[^a-zà-ÿā-žñçâêîôûäöüßåøæœăâîșță]+'))
-        .where((word) => word.isNotEmpty)
-        .toList();
+    // 3. Never pass obviously garbled output (loops, extreme length drift).
+    if (_isGarbled(source, output)) return false;
+
+    // 4. Stopword vote (Latin-script languages only).
+    final words = _words(output);
     if (words.length >= minWordsForVote) {
       final sourceHits = _hits(words, sourceCode);
       if (sourceHits >= minSourceHitsToFail) {
@@ -576,7 +586,7 @@ class OutputLanguageValidator {
         if (targetHits < sourceHits) return false;
       }
 
-      // 4. Third-language tripwire: output clearly in a language that is
+      // 5. Third-language tripwire: output clearly in a language that is
       // neither source nor target (e.g. English text where Tagalog belongs).
       var bestCode = '';
       var bestHits = 0;
@@ -594,6 +604,41 @@ class OutputLanguageValidator {
       }
     }
     return true;
+  }
+
+  static List<String> _words(String text) {
+    return text
+        .toLowerCase()
+        .split(RegExp('[^a-zà-ÿā-žñçâêîôûäöüßåøæœăâîșță]+'))
+        .where((word) => word.isNotEmpty)
+        .toList();
+  }
+
+  /// Repeated n-gram loops ("x y x y x y") or extreme length drift vs the
+  /// source — the model lost meaning and must not be spoken.
+  static bool _isGarbled(String source, String output) {
+    final outWords = _words(output);
+    if (outWords.length >= 6 && _hasRepeatedPhrase(outWords)) return true;
+    final srcWords = _words(source);
+    if (srcWords.length >= minWordsForLengthCheck &&
+        outWords.length >= minWordsForLengthCheck) {
+      final ratio = outWords.length / srcWords.length;
+      if (ratio > maxLengthRatio || ratio < minLengthRatio) return true;
+    }
+    return false;
+  }
+
+  static bool _hasRepeatedPhrase(List<String> words) {
+    // Any 2-4 word phrase occurring minPhraseRepeatsToFail+ times.
+    for (var len = 2; len <= 4; len++) {
+      final counts = <String, int>{};
+      for (var i = 0; i + len <= words.length; i++) {
+        final phrase = words.sublist(i, i + len).join(' ');
+        counts[phrase] = (counts[phrase] ?? 0) + 1;
+        if (counts[phrase]! > minPhraseRepeatsToFail) return true;
+      }
+    }
+    return false;
   }
 
   /// Expected scripts for a target language code (Latin always included).
@@ -648,6 +693,14 @@ class OutputLanguageValidator {
         return <String>{'Latin', 'Khmer'};
       case 'hy':
         return <String>{'Latin', 'Armenian'};
+      case 'lo':
+        return <String>{'Latin', 'Lao'};
+      case 'am':
+        return <String>{'Latin', 'Ethiopic'};
+      case 'tg':
+        return <String>{'Latin', 'Cyrillic'};
+      case 'yue':
+        return <String>{'Latin', 'Han'};
       case 'ka':
         return <String>{'Latin', 'Georgian'};
       default:

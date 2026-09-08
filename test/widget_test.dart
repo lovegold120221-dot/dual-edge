@@ -1,8 +1,8 @@
+import 'package:dual_translate/app.dart';
 import 'package:dual_translate/core/app_config.dart';
 import 'package:dual_translate/core/app_theme.dart';
 import 'package:dual_translate/data/models/translation_settings.dart';
 import 'package:dual_translate/state/app_controller.dart';
-import 'package:dual_translate/ui/configuration_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -29,19 +29,20 @@ void main() {
     expect(emptyConfig.missingRequiredVariables, contains('OLLAMA_URL'));
   });
 
-  testWidgets('missing native configuration is explained', (tester) async {
+  testWidgets('app boots to loading with no account gate', (tester) async {
+    // DualTranslateApp owns the controller lifetime (disposes on unmount).
     final controller = AppController(config: emptyConfig);
-    addTearDown(controller.dispose);
 
     await tester.pumpWidget(
       MaterialApp(
         theme: buildAppTheme(),
-        home: ConfigurationScreen(controller: controller),
+        home: DualTranslateApp(controller: controller),
       ),
     );
 
-    expect(find.text('Native app configuration required'), findsOneWidget);
-    expect(find.textContaining('OLLAMA_URL'), findsOneWidget);
-    expect(find.byIcon(Icons.translate_rounded), findsOneWidget);
+    // Uninitialized controller shows loading; initialized goes straight to
+    // the translator — there is no sign-in step anywhere.
+    expect(find.text('Loading Dual Translate…'), findsOneWidget);
+    expect(find.text('Sign In'), findsNothing);
   });
 }

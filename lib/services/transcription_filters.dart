@@ -148,6 +148,14 @@ class TranscriptionFilters {
         scripts.add('Myanmar');
       } else if (s.contains('khmer')) {
         scripts.add('Khmer');
+      } else if (s.contains('lao')) {
+        scripts.add('Lao');
+      } else if (s.contains('amharic')) {
+        scripts.add('Ethiopic');
+      } else if (s.contains('tajik')) {
+        scripts.add('Cyrillic');
+      } else if (s.contains('cantonese')) {
+        scripts.add('Han');
       } else if (s.contains('armenian')) {
         scripts.add('Armenian');
       } else if (s.contains('georgian')) {
@@ -269,7 +277,19 @@ class TranscriptionFilters {
       if (lower == j) return '';
     }
 
-    return text;
+    return repairTranscript(text);
+  }
+
+  /// Light deterministic repair before translation: whitespace and
+  /// punctuation spacing only. Heavier repair (mishearings, completion)
+  /// uses conversation context inside the translation call.
+  static String repairTranscript(String value) {
+    var text = value.trim().replaceAll(RegExp(r'\s+'), ' ');
+    text = text.replaceAllMapped(
+      RegExp(r'\s+([,.!?;:])'),
+      (match) => match.group(1)!,
+    );
+    return text.trim();
   }
 
   /// Convert PCM16 little-endian mono bytes to normalized float samples.

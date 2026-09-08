@@ -1,9 +1,16 @@
+import 'dart:io';
+import 'dart:typed_data';
+
 import 'package:dual_translate/core/app_config.dart';
+import 'package:dual_translate/data/eb_translator_prompt.dart';
 import 'package:dual_translate/data/models/translation_settings.dart';
 import 'package:dual_translate/data/sherpa_speech_assets.dart';
 import 'package:dual_translate/data/tts_voices.dart';
+import 'package:dual_translate/services/local_model_store.dart';
+import 'package:dual_translate/services/offline_readiness.dart';
 import 'package:dual_translate/services/sherpa_tts_service.dart';
 import 'package:dual_translate/services/transcription_filters.dart';
+import 'package:dual_translate/services/vad_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -188,6 +195,10 @@ void main() {
 
   group('multilingual tts voices', () {
     test('display names resolve to language codes', () {
+      expect(TtsVoices.langCodeFor('Tagalog (Filipino)'), 'tl');
+      expect(TtsVoices.langCodeFor('Thai'), 'th');
+      expect(TtsVoices.langCodeFor('Malay'), 'ms');
+      expect(TtsVoices.langCodeFor('Cebuano'), 'ceb');
       expect(TtsVoices.langCodeFor('Dutch (Flemish)'), 'nl');
       expect(TtsVoices.langCodeFor('English (US)'), 'en');
       expect(TtsVoices.langCodeFor('French'), 'fr');
@@ -216,14 +227,28 @@ void main() {
     });
 
     test('piper covers languages outside supertonic', () {
-      expect(TtsVoices.forLanguage('Chinese (Simplified)').isPiper, isTrue);
-      expect(
-        TtsVoices.forLanguage('Chinese (Simplified)').piperBundle,
-        'zh_CN-huayan-medium',
-      );
+      // Chinese has no usable local male voice: Supertonic English fallback.
+      expect(TtsVoices.forLanguage('Chinese (Simplified)').isPiper, isFalse);
       expect(
         TtsVoices.forLanguage('Catalan').piperBundle,
         'ca_ES-upc_ona-medium',
+      );
+      // Male-default piper voices (pitch-verified).
+      expect(
+        TtsVoices.forLanguage('Basque').piperBundle,
+        'eu_ES-antton-medium',
+      );
+      expect(
+        TtsVoices.forLanguage('Icelandic').piperBundle,
+        'is_IS-steinn-medium',
+      );
+      expect(
+        TtsVoices.forLanguage('Malayalam').piperBundle,
+        'ml_IN-arjun-medium',
+      );
+      expect(
+        TtsVoices.forLanguage('Nepali').piperBundle,
+        'ne_NP-chitwan-medium',
       );
       // Uncovered languages fall back to Supertonic English.
       expect(TtsVoices.forLanguage('Tagalog (Filipino)').isPiper, isFalse);
@@ -244,7 +269,10 @@ void main() {
       expect(SherpaTtsService.engineKeyFor('English (US)'), 'supertonic');
       expect(SherpaTtsService.engineKeyFor('Dutch (Flemish)'), 'supertonic');
       expect(SherpaTtsService.engineKeyFor('Korean'), 'supertonic');
-      expect(SherpaTtsService.engineKeyFor('Chinese (Simplified)'), 'zh');
+      expect(
+        SherpaTtsService.engineKeyFor('Chinese (Simplified)'),
+        'supertonic',
+      );
       expect(SherpaTtsService.engineKeyFor('Tagalog (Filipino)'), 'supertonic');
       expect(SherpaTtsService.synthLangFor('Dutch (Flemish)'), 'nl');
       expect(SherpaTtsService.synthLangFor('Tagalog (Filipino)'), 'en');
@@ -289,6 +317,156 @@ void main() {
         SherpaTtsService.femaleSid,
       );
       expect(SherpaTtsService.maleSid, isNot(SherpaTtsService.femaleSid));
+    });
+  });
+
+  group('voice activity detection', () {
+    test('silero asset points at the k2-fsa release', () {
+      final ref = SherpaSpeechAssets.vadModel();
+      expect(ref.url, contains('silero_vad.onnx'));
+      expect(ref.relativePath, endsWith('.onnx'));
+      expect(ref.minBytes, greaterThan(0));
+    });
+
+    test('fallback windows keep transcription alive without a model', () {
+      final vad = VadService();
+      addTearDown(vad.dispose);
+      expect(vad.isReady, isFalse);
+
+      // Short feed: nothing completes yet.
+      expect(vad.feed(List<int>.filled(1000, 0)), isEmpty);
+      // Full ~3.75 s window completes exactly one utterance.
+      final done = vad.feed(
+        List<int>.filled(VadService.fallbackWindowBytes, 0),
+      );
+      expect(done, hasLength(1));
+      expect(done.single.pcmBytes, hasLength(VadService.fallbackWindowBytes));
+      // Remainder carries over to the next feed.
+      final more = vad.feed(
+        List<int>.filled(VadService.fallbackWindowBytes + 500, 0),
+      );
+      expect(more, hasLength(1));
+      // Reset drops buffered audio.
+      vad.reset();
+      expect(
+        vad.feed(List<int>.filled(VadService.fallbackWindowBytes - 1, 0)),
+        isEmpty,
+      );
+    });
+
+    test('utterances carry finality for fragment holding', () {
+      final finalU = VadUtterance(Uint8List(0));
+      expect(finalU.isFinal, isTrue);
+      final fragment = VadUtterance(Uint8List(0), isFinal: false);
+      expect(fragment.isFinal, isFalse);
+    });
+  });
+
+  group('offline readiness', () {
+    Future<Directory> seed({
+      bool gguf = true,
+      bool stt = true,
+      bool supertonic = true,
+      List<String> piperBundles = const <String>['nl_BE-nathalie-medium'],
+      bool espeak = true,
+    }) async {
+      final dir = await Directory.systemTemp.createTemp('models');
+      addTearDown(() {
+        try {
+          dir.deleteSync(recursive: true);
+        } catch (_) {}
+      });
+      Future<void> big(String relative, int bytes) async {
+        final file = File('${dir.path}/$relative');
+        await file.parent.create(recursive: true);
+        final sink = file.openWrite();
+        final chunk = Uint8List(65536);
+        var left = bytes;
+        while (left > 0) {
+          final n = left > chunk.length ? chunk.length : left;
+          sink.add(chunk.sublist(0, n));
+          left -= n;
+        }
+        await sink.close();
+      }
+
+      if (gguf) {
+        await big(
+          EbTranslatorPrompt.defaultGgufFileName,
+          EbTranslatorPrompt.minModelBytes + 10,
+        );
+      }
+      if (stt) {
+        for (final ref in SherpaSpeechAssets.sttFiles('base')) {
+          await big(ref.relativePath, ref.minBytes + 10);
+        }
+      }
+      if (supertonic) {
+        await big('${TtsVoices.supertonicDirName}/.extracted', 30);
+      }
+      for (final bundle in piperBundles) {
+        await big('${TtsVoices.piperDirName(bundle)}/.extracted', 30);
+      }
+      if (espeak) {
+        await big(
+          '${SherpaSpeechAssets.ttsDirName}/${SherpaSpeechAssets.espeakDataDirName}/.extracted',
+          30,
+        );
+      }
+      return dir;
+    }
+
+    Future<OfflineReadiness> check(
+      Directory dir, {
+      String guest = 'Dutch (Flemish)',
+    }) {
+      final store = LocalModelStore(baseDir: dir);
+      addTearDown(store.dispose);
+      return OfflineReadiness.check(
+        store: store,
+        sttVariant: 'base',
+        guestLanguage: guest,
+      );
+    }
+
+    test('fully seeded models report ready', () async {
+      final readiness = await check(await seed());
+      expect(readiness.isReady, isTrue);
+      expect(readiness.missing, isEmpty);
+    });
+
+    test('missing translator lists it by name', () async {
+      final readiness = await check(await seed(gguf: false));
+      expect(readiness.isReady, isFalse);
+      expect(readiness.missing.join(' '), contains('Translator'));
+      expect(readiness.message, contains('Wi-Fi'));
+    });
+
+    test('piper guest requires its bundle, others do not', () async {
+      final noPiper = await check(
+        await seed(piperBundles: const <String>[]),
+        guest: 'Catalan',
+      );
+      expect(noPiper.isReady, isFalse);
+      expect(noPiper.missing.join(' '), contains('Piper'));
+
+      final withPiper = await check(
+        await seed(piperBundles: const <String>['ca_ES-upc_ona-medium']),
+        guest: 'Catalan',
+      );
+      expect(withPiper.isReady, isTrue);
+
+      final englishGuest = await check(
+        await seed(piperBundles: const <String>[]),
+        guest: 'English (US)',
+      );
+      expect(englishGuest.isReady, isTrue);
+    });
+
+    test('missing supertonic blocks even with piper present', () async {
+      final readiness = await check(await seed(supertonic: false));
+      expect(readiness.isReady, isFalse);
+      expect(readiness.missing.join(' '), contains('Supertonic'));
     });
   });
 }

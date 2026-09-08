@@ -34,19 +34,18 @@ const TTS_RELEASE =
 const PIPER_VOICES = {
   ca: "ca_ES-upc_ona-medium",
   cy: "cy_GB-gwryw_gogleddol-medium",
-  eu: "eu_ES-maider-medium",
+  eu: "eu_ES-antton-medium",
   fa: "fa_IR-amir-medium",
-  is: "is_IS-salka-medium",
+  is: "is_IS-steinn-medium",
   ku: "ku_TR-berfin_renas-medium",
   lb: "lb_LU-marylux-medium",
-  ml: "ml_IN-meera-medium",
-  ne: "ne_NP-google-medium",
+  ml: "ml_IN-arjun-medium",
+  ne: "ne_NP-chitwan-medium",
   no: "no_NO-talesyntese-medium",
   sq: "sq_AL-edon-medium",
   sr: "sr_RS-serbski_institut-medium",
   sw: "sw_CD-lanfrica-medium",
   ur: "ur_PK-fasih-medium",
-  zh: "zh_CN-huayan-medium",
 };
 
 // Gap languages served by the local MMS sidecar (Meta MMS-TTS, offline

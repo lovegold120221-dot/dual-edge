@@ -54,13 +54,6 @@ class SettingsDrawer extends StatelessWidget {
               child: ListView(
                 padding: const EdgeInsets.all(16),
                 children: <Widget>[
-                  const _ProfileCard(
-                    displayName: 'Translator',
-                    email: 'local',
-                    photoUrl: '',
-                    isSuperAdmin: false,
-                  ),
-                  const SizedBox(height: 22),
                   _SectionTitle(
                     title: 'Translation setup',
                     trailing: controller.connected
@@ -211,9 +204,11 @@ class SettingsDrawer extends StatelessWidget {
                     ),
                     const SizedBox(height: 6),
                     const Text(
-                      'Models download once (about 1 GB total on Wi-Fi), '
-                      'then STT, translation, and TTS all run fully offline '
-                      'on this phone. Sign-in stays with Firebase.',
+                      'Models download once on Wi-Fi (translator ≈2.5 GB, '
+                      'the rest is small), then STT, translation, and TTS '
+                      'all run fully offline on this phone — no Wi-Fi '
+                      'needed afterwards. No account or sign-in needed — '
+                      'everything runs locally.',
                       style: TextStyle(color: AppColors.muted, fontSize: 12),
                     ),
                     const SizedBox(height: 28),
@@ -328,23 +323,12 @@ class SettingsDrawer extends StatelessWidget {
               ),
             ),
             const Divider(height: 1),
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  OutlinedButton.icon(
-                    onPressed: controller.signOut,
-                    icon: const Icon(Icons.logout_rounded),
-                    label: const Text('Sign Out'),
-                  ),
-                  const SizedBox(height: 10),
-                  const Text(
-                    'Powered by Eburon AI',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: AppColors.muted, fontSize: 11),
-                  ),
-                ],
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text(
+                'Powered by Eburon AI',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: AppColors.muted, fontSize: 11),
               ),
             ),
           ],
@@ -381,76 +365,6 @@ class SettingsDrawer extends StatelessWidget {
         context,
       ).showSnackBar(SnackBar(content: Text(error.toString())));
     }
-  }
-}
-
-class _ProfileCard extends StatelessWidget {
-  const _ProfileCard({
-    required this.displayName,
-    required this.email,
-    required this.photoUrl,
-    required this.isSuperAdmin,
-  });
-
-  final String displayName;
-  final String email;
-  final String photoUrl;
-  final bool isSuperAdmin;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: AppColors.surfaceHigh,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Row(
-        children: <Widget>[
-          CircleAvatar(
-            radius: 24,
-            foregroundImage: photoUrl.trim().isNotEmpty != true ? null : null,
-            backgroundColor: const Color(0xFF6366F1),
-            child: Text(
-              displayName.isEmpty ? 'U' : displayName[0].toUpperCase(),
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Row(
-                  children: <Widget>[
-                    Flexible(
-                      child: Text(
-                        displayName,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: AppColors.text,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  email,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: AppColors.muted, fontSize: 12),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
   }
 }
 

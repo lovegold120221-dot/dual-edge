@@ -9,7 +9,6 @@ import '../data/models/history_item.dart';
 import '../data/models/translation_settings.dart';
 import '../data/translation_data.dart';
 import '../data/tts_voices.dart';
-import '../services/firebase_service.dart';
 import '../services/live_audio_service.dart';
 import '../services/ollama_service.dart';
 import '../services/ondevice_llm_service.dart';
@@ -21,12 +20,14 @@ import '../services/stt_service.dart';
 import '../services/transcription_filters.dart';
 import '../services/tts_service.dart';
 import '../services/tts_text_normalizer.dart';
+import '../services/local_model_store.dart';
+import '../services/offline_readiness.dart';
+import '../services/vad_service.dart';
 import '../services/translation_service.dart';
 
 class AppController extends ChangeNotifier {
   AppController({required this.config})
-    : firebase = FirebaseService(config),
-      _preferences = PreferenceStore(),
+    : _preferences = PreferenceStore(),
       _audio = LiveAudioService(),
       _stt = SttService(),
       _translation = TranslationService(config: config),
@@ -34,13 +35,14 @@ class AppController extends ChangeNotifier {
     // Desktop TTS needs the audio service for echo references.
     _tts = TtsService(baseUrl: config.kokoroTtsUrl, audio: _audio);
     // Phones run STT/TTS fully on-device (sherpa); desktop keeps
-    // whisper-cli + the TTS server. Firebase Auth is unchanged.
+    // whisper-cli + the TTS server.
     _sherpaStt = SherpaSttService(sttVariant: config.resolvedSttVariant);
     _sherpaTts = SherpaTtsService(audio: _audio);
+    // Voice activity detection is shared by every platform (2 MB model).
+    _vad = VadService();
   }
 
   final AppConfig config;
-  final FirebaseService firebase;
   final PreferenceStore _preferences;
   final LiveAudioService _audio;
   final SttService _stt;
@@ -49,6 +51,7 @@ class AppController extends ChangeNotifier {
   final OllamaService _ollama;
   late final SherpaSttService _sherpaStt;
   late final SherpaTtsService _sherpaTts;
+  late final VadService _vad;
 
   /// True on phones: STT/TTS/LLM all run from on-device models.
   bool get useOnDeviceSpeech => SherpaSttService.isSupported;
@@ -86,8 +89,60 @@ class AppController extends ChangeNotifier {
   /// Latest transcript queued while a prior turn is still being handled.
   SttTranscript? _pendingTranscript;
 
+  /// Held text of max-speech-cut fragments: translated only once the
+  /// utterance finalizes, so translation always sees the full sentence.
+  String _heldFragmentText = '';
+  String _heldFragmentLang = '';
+
   /// Mic stays gated this long after TTS ends (room/speaker tail).
   static const echoReleaseDelay = Duration(milliseconds: 900);
+
+  /// Last spoken translation, for the textual echo backstop below.
+  String? _lastSpokenText;
+  DateTime? _lastSpokenAt;
+
+  /// Window in which an identical re-hearing counts as our own echo.
+  static const echoTextWindow = Duration(seconds: 30);
+
+  /// True when [source] is almost certainly our own just-spoken output
+  /// re-captured by the microphone (acoustic guard missed it).
+  bool _isOwnEcho(String source) {
+    final spoken = _lastSpokenText;
+    final at = _lastSpokenAt;
+    if (spoken == null || at == null) return false;
+    return isOwnEchoText(
+      spoken: spoken,
+      spokenAt: at,
+      source: source,
+      now: DateTime.now(),
+    );
+  }
+
+  /// Pure echo comparison (testable): identical or long containment within
+  /// [echoTextWindow] of speaking.
+  static bool isOwnEchoText({
+    required String spoken,
+    required DateTime spokenAt,
+    required String source,
+    required DateTime now,
+  }) {
+    if (spoken.trim().isEmpty) return false;
+    if (now.difference(spokenAt) > echoTextWindow) return false;
+    String norm(String value) =>
+        value.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+    final a = norm(source);
+    final b = norm(spoken);
+    if (a.isEmpty || b.isEmpty) return false;
+    if (a == b) return true;
+    // Partial captures of a long spoken sentence still match.
+    if (a.length >= 12 && (b.contains(a) || a.contains(b))) return true;
+    return false;
+  }
+
+  void _noteSpoken(String text) {
+    _lastSpokenText = text;
+    _lastSpokenAt = DateTime.now();
+  }
 
   Future<void> initialize() async {
     await _preferences.initialize();
@@ -102,16 +157,6 @@ class AppController extends ChangeNotifier {
       await _preferences.saveSettings(settings);
     }
     history.addAll(_preferences.loadHistory());
-    firebase.addListener(_relayFirebaseChange);
-
-    // Firebase may be unavailable on macOS (no DefaultFirebaseOptions).
-    try {
-      await firebase.initialize().timeout(const Duration(seconds: 3));
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('Firebase service init skipped: $e');
-      }
-    }
 
     // Show TranslatorScreen ASAP; heavy local services continue below.
     initialized = true;
@@ -133,6 +178,16 @@ class AppController extends ChangeNotifier {
     if (OnDeviceLlmService.isSupported) {
       unawaited(_prepareOnDeviceModel());
     }
+
+    // Voice activity detection is shared by every platform (tiny model,
+    // fetched in the background; fixed windows cover the gap meanwhile).
+    unawaited(
+      _vad.init().then((_) {
+        if (_vad.lastError != null && kDebugMode) {
+          debugPrint('VAD unavailable: ${_vad.lastError}');
+        }
+      }),
+    );
 
     try {
       if (useOnDeviceSpeech) {
@@ -288,8 +343,6 @@ class AppController extends ChangeNotifier {
     label: 'On-device speech synthesis download',
   );
 
-  void _relayFirebaseChange() => notifyListeners();
-
   /// Pass language hint into STT based on autoDetect / language1 / language2.
   void _applySttLanguageHint() {
     // Script guard follows the active pair so foreign-script whisper
@@ -324,22 +377,6 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> signIn(String email, String password) =>
-      firebase.signIn(email, password);
-
-  Future<void> signUp(String email, String password) =>
-      firebase.signUp(email, password);
-
-  Future<void> sendPasswordReset(String email) =>
-      firebase.sendPasswordReset(email);
-
-  Future<void> signInWithGoogle() => firebase.signInWithGoogle();
-
-  Future<void> signOut() async {
-    await disconnect();
-    await firebase.signOut();
-  }
-
   Future<void> disconnect() async {
     stopLocalTranslation();
     connected = false;
@@ -347,6 +384,8 @@ class AppController extends ChangeNotifier {
     micLevel = 0;
     aiSpeaking = false;
     _pendingTranscript = null;
+    _lastSpokenText = null;
+    _lastSpokenAt = null;
     await _ttsBackend.stop();
     await _audio.stopInput();
     await _audio.stopOutput();
@@ -360,6 +399,24 @@ class AppController extends ChangeNotifier {
     notifyListeners();
     try {
       if (TranslationService.useOnDevice()) {
+        // Phone path: no Ollama server exists — everything must already be
+        // on-device. Fail fast with a clear message instead of hanging on
+        // downloads when there is no Wi-Fi; background fetchers keep
+        // working and the next tap succeeds once files land.
+        final store = LocalModelStore();
+        OfflineReadiness readiness;
+        try {
+          readiness = await OfflineReadiness.check(
+            store: store,
+            sttVariant: config.resolvedSttVariant,
+            guestLanguage: settings.language2,
+          );
+        } finally {
+          unawaited(store.dispose());
+        }
+        if (!readiness.isReady) {
+          throw StateError(readiness.message);
+        }
         // Phone path: no Ollama server exists — load the on-device GGUF
         // (downloads on first run; afterwards fully offline). Speech models
         // (sherpa whisper + Supertonic) must be ready too.
@@ -419,6 +476,7 @@ class AppController extends ChangeNotifier {
   Future<void> startLocalTranslation() async {
     turns.clear();
     _sttBackend.reset();
+    _vad.reset();
     _pendingTranscript = null;
     stopLocalTranslation();
 
@@ -447,9 +505,18 @@ class AppController extends ChangeNotifier {
           notifyListeners();
         }
         if (micMuted || !frame.shouldTransmit) return;
-        // Avoid feeding speaker echo into Whisper while TTS is talking.
+        // Avoid feeding speaker echo into recognition while TTS is talking.
         if (aiSpeaking) return;
-        _sttBackend.feedPcmChunk(frame.bytes);
+        // VAD segments speech into complete utterances (no cut words);
+        // each one transcribes immediately. Non-final segments (long
+        // speech cut by the duration cap) still flow; the transcript
+        // layer holds their text until the utterance completes.
+        for (final utterance in _vad.feed(frame.bytes)) {
+          _sttBackend.transcribeUtterance(
+            utterance.pcmBytes,
+            isFinal: utterance.isFinal,
+          );
+        }
       },
       onError: (Object error) {
         lastError = error.toString();
@@ -464,14 +531,47 @@ class AppController extends ChangeNotifier {
     final source = result.text.trim();
     final langCode = result.languageCode.trim().toLowerCase();
     if (source.isEmpty || !connected || micMuted) return;
+    // Textual echo backstop: drop our own just-spoken output when the
+    // acoustic guard missed it. Never becomes a turn, never re-translated.
+    if (_isOwnEcho(source)) {
+      if (kDebugMode) {
+        debugPrint('AppController: dropped own TTS echo');
+      }
+      return;
+    }
+    // Fragment hold: max-speech cuts are partial by construction. Collect
+    // their text and translate only once the utterance finalizes, so the
+    // engine always sees the full sentence — never keywords or fragments.
+    if (!result.isFinal) {
+      _heldFragmentText = _heldFragmentText.isEmpty
+          ? source
+          : '$_heldFragmentText $source';
+      if (_heldFragmentLang.isEmpty) _heldFragmentLang = langCode;
+      if (kDebugMode) {
+        debugPrint('AppController: holding fragment (${source.length} chars)');
+      }
+      return;
+    }
+    var fullSource = source;
+    var fullLang = langCode;
+    if (_heldFragmentText.isNotEmpty) {
+      fullSource = '$_heldFragmentText $source';
+      if (fullLang.isEmpty) fullLang = _heldFragmentLang;
+      _heldFragmentText = '';
+      _heldFragmentLang = '';
+    }
     if (_handlingTranscription) {
       // Keep latest transcript instead of dropping while busy.
-      _pendingTranscript = (text: source, languageCode: langCode);
+      _pendingTranscript = (
+        text: fullSource,
+        languageCode: fullLang,
+        isFinal: true,
+      );
       return;
     }
     _handlingTranscription = true;
     try {
-      await _processTranscript(source, langCode);
+      await _processTranscript(fullSource, fullLang);
     } finally {
       _handlingTranscription = false;
       final pending = _pendingTranscript;
@@ -537,7 +637,7 @@ class AppController extends ChangeNotifier {
         }
       }
 
-      final translated = await _translation.translateTurn(
+      final result = await _translation.translateTurn(
         sourceText: source,
         sourceLanguage: sourceDisplay,
         targetLanguage: targetLanguage,
@@ -546,6 +646,20 @@ class AppController extends ChangeNotifier {
         model: settings.model,
       );
 
+      // Guest-switch signal from the STRICT pairing rules: the tag carries
+      // a language name, resolved to a code and then to a display name.
+      // Adopt the newly heard guest language for the rest of the session.
+      if (result.guestLanguage.isNotEmpty) {
+        final guestCode = TtsVoices.langCodeFor(result.guestLanguage);
+        final guestDisplay =
+            displayNameForLanguageCode(guestCode) ?? result.guestLanguage;
+        if (guestDisplay != settings.language1 &&
+            guestDisplay != settings.language2) {
+          updateSettings(settings.copyWith(language2: guestDisplay));
+        }
+      }
+
+      final translated = result.text;
       if (translated == null || translated.isEmpty) {
         lastError = _translation.lastError ?? 'Translation failed';
         notifyListeners();
@@ -593,11 +707,15 @@ class AppController extends ChangeNotifier {
         notifyListeners();
         try {
           await _ttsBackend.speak(speakText, language: targetLanguage);
+          _noteSpoken(speakText);
         } finally {
-          // Hold the mic gate through the room tail so speaker output is
-          // never re-captured, then flush any contaminated STT audio.
+          // Strict turn-based rule: the mic stays fully closed until readout
+          // ends plus the room tail, then every speech buffer is flushed so
+          // no speaker residue can become the next turn. Recording resumes
+          // only afterwards — never simultaneously, no exceptions.
           await Future<void>.delayed(echoReleaseDelay);
           _sttBackend.reset();
+          _vad.reset();
           aiSpeaking = false;
           notifyListeners();
         }
@@ -608,9 +726,13 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Shared wording with the desktop Ollama path (see EbTranslatorPrompt).
-  String _localTranslateSystemPrompt() =>
-      EbTranslatorPrompt.system(medicalMode: settings.medicalMode);
+  /// STRICT MODE system prompt with the live pair, topic, and medical mode.
+  String _localTranslateSystemPrompt() => EbTranslatorPrompt.strictSystem(
+    staffLanguage: settings.language1,
+    guestLanguage: settings.language2,
+    topic: settings.topic,
+    medicalMode: settings.medicalMode,
+  );
 
   void stopLocalTranslation() {
     _sttSubscription?.cancel();
@@ -618,7 +740,10 @@ class AppController extends ChangeNotifier {
     _audioSubscription?.cancel();
     _audioSubscription = null;
     _sttBackend.reset();
+    _vad.reset();
     _pendingTranscript = null;
+    _heldFragmentText = '';
+    _heldFragmentLang = '';
   }
 
   @override
@@ -629,9 +754,8 @@ class AppController extends ChangeNotifier {
     _stt.dispose();
     unawaited(_sherpaTts.dispose());
     _sherpaStt.dispose();
+    unawaited(_vad.dispose());
     unawaited(_translation.dispose());
-    firebase.removeListener(_relayFirebaseChange);
-    firebase.dispose();
     unawaited(_audio.dispose());
     super.dispose();
   }

@@ -65,19 +65,18 @@ class TtsVoices {
   static const Map<String, TtsVoiceSpec> byLang = <String, TtsVoiceSpec>{
     'ca': TtsVoiceSpec.piper('ca_ES-upc_ona-medium'),
     'cy': TtsVoiceSpec.piper('cy_GB-gwryw_gogleddol-medium'),
-    'eu': TtsVoiceSpec.piper('eu_ES-maider-medium'),
+    'eu': TtsVoiceSpec.piper('eu_ES-antton-medium'),
     'fa': TtsVoiceSpec.piper('fa_IR-amir-medium'),
-    'is': TtsVoiceSpec.piper('is_IS-salka-medium'),
+    'is': TtsVoiceSpec.piper('is_IS-steinn-medium'),
     'ku': TtsVoiceSpec.piper('ku_TR-berfin_renas-medium'),
     'lb': TtsVoiceSpec.piper('lb_LU-marylux-medium'),
-    'ml': TtsVoiceSpec.piper('ml_IN-meera-medium'),
-    'ne': TtsVoiceSpec.piper('ne_NP-google-medium'),
+    'ml': TtsVoiceSpec.piper('ml_IN-arjun-medium'),
+    'ne': TtsVoiceSpec.piper('ne_NP-chitwan-medium'),
     'no': TtsVoiceSpec.piper('no_NO-talesyntese-medium'),
     'sq': TtsVoiceSpec.piper('sq_AL-edon-medium'),
     'sr': TtsVoiceSpec.piper('sr_RS-serbski_institut-medium'),
     'sw': TtsVoiceSpec.piper('sw_CD-lanfrica-medium'),
     'ur': TtsVoiceSpec.piper('ur_PK-fasih-medium'),
-    'zh': TtsVoiceSpec.piper('zh_CN-huayan-medium'),
   };
 
   /// Bundle file name for a Piper voice (sherpa tts-models release).
@@ -160,12 +159,53 @@ class TtsVoices {
     if (raw.contains('kurdish')) return 'ku';
     if (raw.contains('luxembourg')) return 'lb';
     if (raw.contains('malayalam')) return 'ml';
+    if (raw.contains('malay') || raw.contains('malaysian')) return 'ms';
     if (raw.contains('nepali')) return 'ne';
     if (raw.contains('norwegian')) return 'no';
     if (raw.contains('albanian')) return 'sq';
     if (raw.contains('serbian')) return 'sr';
     if (raw.contains('swahili')) return 'sw';
     if (raw.contains('urdu')) return 'ur';
+    if (raw.contains('tagalog') || raw.contains('filipino')) return 'tl';
+    if (raw.contains('cebuano')) return 'ceb';
+    if (raw.contains('thai')) return 'th';
+    if (raw.contains('bengali')) return 'bn';
+    if (raw.contains('tamil')) return 'ta';
+    if (raw.contains('telugu')) return 'te';
+    if (raw.contains('marathi')) return 'mr';
+    if (raw.contains('gujarati')) return 'gu';
+    if (raw.contains('kannada')) return 'kn';
+    if (raw.contains('burmese') || raw.contains('myanmar')) return 'my';
+    if (raw.contains('khmer')) return 'kh';
+    if (raw.contains('lao')) return 'lo';
+    if (raw.contains('shona')) return 'sn';
+    if (raw.contains('chichewa') || raw.contains('nyanja')) return 'ny';
+    if (raw.contains('malagasy')) return 'mg';
+    if (raw.contains('mongolian')) return 'mon';
+    if (raw.contains('samoan')) return 'sm';
+    if (raw.contains('hausa')) return 'ha';
+    if (raw.contains('yoruba')) return 'yo';
+    if (raw.contains('somali')) return 'so';
+    if (raw.contains('amharic')) return 'am';
+    if (raw.contains('tajik')) return 'tg';
+    if (raw.contains('kazakh')) return 'kk';
+    if (raw.contains('kyrgyz')) return 'ky';
+    if (raw.contains('hebrew')) return 'he';
+    if (raw.contains('hawaiian')) return 'haw';
+    if (raw.contains('maori')) return 'mi';
+    if (raw.contains('georgian')) return 'ka';
+    if (raw.contains('armenian')) return 'hy';
+    if (raw.contains('azerbaijani')) return 'az';
+    if (raw.contains('belarusian')) return 'be';
+    if (raw.contains('galician')) return 'gl';
+    if (raw.contains('croatian')) return 'hr';
+    if (raw.contains('bosnian')) return 'bs';
+    if (raw.contains('macedonian')) return 'mk';
+    if (raw.contains('maltese')) return 'mt';
+    if (raw.contains('irish')) return 'ga';
+    if (raw.contains('sinhala') || raw.contains('sinhalese')) return 'si';
+    if (raw.contains('pashto')) return 'ps';
+    if (raw.contains('cantonese')) return 'yue';
     return 'en';
   }
 

@@ -45,15 +45,8 @@ class SttService implements SttBackend {
   @override
   Set<String> expectedScripts = <String>{'Latin'};
 
-  final List<int> _pcmBuffer = <int>[];
-  final List<List<int>> _pendingChunks = <List<int>>[];
-  List<int> _overlapTail = <int>[];
-
-  /// ~3.75s of 16 kHz mono PCM16 (bytes). Range 112000–128000 (~3.5–4.0s).
-  static const int bufferSizeBytes = 120000;
-
-  /// ~0.5s of previous PCM kept for continuity across chunk boundaries.
-  static const int overlapBytes = 16000;
+  final List<({List<int> pcm, bool isFinal})> _pendingChunks =
+      <({List<int> pcm, bool isFinal})>[];
 
   final _onTranscription = StreamController<SttTranscript>.broadcast();
   @override
@@ -140,7 +133,7 @@ class SttService implements SttBackend {
         if (kDebugMode) {
           debugPrint(
             'SttService.init ok model=$_modelPath '
-            '($_modelFileNameInUse) chunkBytes=$bufferSizeBytes',
+            '($_modelFileNameInUse)',
           );
         }
         // Prefer small for accuracy — download in background if not already using it.
@@ -328,27 +321,17 @@ class SttService implements SttBackend {
   }
 
   @override
-  void feedPcmChunk(List<int> chunk) {
-    if (!_initialized || _modelPath == null || chunk.isEmpty) return;
-    _pcmBuffer.addAll(chunk);
-    while (_pcmBuffer.length >= bufferSizeBytes) {
-      // Copy-before-clear so overlapping work never mutates the slice.
-      final slice = List<int>.from(_pcmBuffer.sublist(0, bufferSizeBytes));
-      _pcmBuffer.removeRange(0, bufferSizeBytes);
-      _enqueue(slice);
-    }
-  }
-
-  void _enqueue(List<int> pcmBytes) {
+  void transcribeUtterance(List<int> pcmBytes, {bool isFinal = true}) {
+    if (!_initialized || _modelPath == null || pcmBytes.isEmpty) return;
     if (_transcribing) {
-      _pendingChunks.add(pcmBytes);
+      _pendingChunks.add((pcm: List<int>.from(pcmBytes), isFinal: isFinal));
       // Bound queue so we don't grow forever under load.
       while (_pendingChunks.length > 3) {
         _pendingChunks.removeAt(0);
       }
       return;
     }
-    unawaited(_transcribeBytes(pcmBytes));
+    unawaited(_transcribeBytes(List<int>.from(pcmBytes), isFinal: isFinal));
   }
 
   /// True when the chunk is near silence (skip whisper to avoid hallucinations).
@@ -356,25 +339,15 @@ class SttService implements SttBackend {
   static bool _isNearSilence(List<int> pcmBytes) =>
       TranscriptionFilters.isNearSilence(pcmBytes);
 
-  Future<void> _transcribeBytes(List<int> pcmBytes) async {
+  Future<void> _transcribeBytes(
+    List<int> pcmBytes, {
+    bool isFinal = true,
+  }) async {
     if (pcmBytes.isEmpty || _modelPath == null) return;
     _transcribing = true;
     File? tempFile;
     try {
-      // Optional 0.5s overlap of previous PCM for continuity.
-      List<int> withOverlap = pcmBytes;
-      if (_overlapTail.isNotEmpty) {
-        withOverlap = <int>[..._overlapTail, ...pcmBytes];
-      }
-      // Keep last overlapBytes of *this* chunk for the next call.
-      if (pcmBytes.length >= overlapBytes) {
-        _overlapTail = List<int>.from(
-          pcmBytes.sublist(pcmBytes.length - overlapBytes),
-        );
-      } else {
-        _overlapTail = List<int>.from(pcmBytes);
-      }
-
+      // VAD delivers complete padded utterances; no overlap stitching needed.
       if (_isNearSilence(pcmBytes)) {
         if (kDebugMode) {
           debugPrint('SttService: silence gate — skip whisper');
@@ -383,7 +356,7 @@ class SttService implements SttBackend {
         return;
       }
 
-      tempFile = await _writeTempWav(withOverlap);
+      tempFile = await _writeTempWav(pcmBytes);
       // Absolute path so whisper-cli never depends on cwd.
       final wavPath = tempFile.absolute.path;
       final lang = (_language.isEmpty) ? 'auto' : _language;
@@ -402,7 +375,7 @@ class SttService implements SttBackend {
       if (kDebugMode) {
         debugPrint(
           'SttService: whisper-cli lang=$lang model=$_modelFileNameInUse '
-          'pcm=${withOverlap.length}B',
+          'pcm=${pcmBytes.length}B',
         );
       }
       final result = await Process.run(whisperCliPath, args);
@@ -416,6 +389,7 @@ class SttService implements SttBackend {
         _onTranscription.add((
           text: text,
           languageCode: parseDetectedLanguage(result.stderr),
+          isFinal: isFinal,
         ));
       }
     } catch (e) {
@@ -433,7 +407,7 @@ class SttService implements SttBackend {
       _transcribing = false;
       if (_pendingChunks.isNotEmpty) {
         final next = _pendingChunks.removeAt(0);
-        unawaited(_transcribeBytes(next));
+        unawaited(_transcribeBytes(next.pcm, isFinal: next.isFinal));
       }
     }
   }
@@ -555,16 +529,12 @@ class SttService implements SttBackend {
 
   @override
   void reset() {
-    _pcmBuffer.clear();
     _pendingChunks.clear();
-    _overlapTail = <int>[];
   }
 
   @override
   void dispose() {
-    _pcmBuffer.clear();
     _pendingChunks.clear();
-    _overlapTail = <int>[];
     if (!_onTranscription.isClosed) {
       _onTranscription.close();
     }

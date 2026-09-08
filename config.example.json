@@ -1,6 +1,5 @@
 {
   "OLLAMA_URL": "http://localhost:11434",
   "OLLAMA_MODEL": "eb-translator",
-  "EB_TRANSLATOR_GGUF_URL": "https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf/resolve/main/gemma-3-4b-it-q4_0.gguf",
-  "GOOGLE_SERVER_CLIENT_ID": ""
+  "EB_TRANSLATOR_GGUF_URL": "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf"
 }

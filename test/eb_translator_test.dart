@@ -6,8 +6,10 @@ import 'package:dual_translate/services/ollama_service.dart';
 import 'package:dual_translate/services/ondevice_llm_service.dart';
 import 'package:dual_translate/services/output_language_validator.dart';
 import 'package:dual_translate/services/stt_service.dart';
+import 'package:dual_translate/services/transcription_filters.dart';
 import 'package:dual_translate/services/translation_service.dart';
 import 'package:dual_translate/services/tts_text_normalizer.dart';
+import 'package:dual_translate/state/app_controller.dart';
 import 'package:flutter_local_llm/flutter_local_llm.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -169,6 +171,8 @@ void main() {
       expect(displayNameForLanguageCode('tl'), 'Tagalog (Filipino)');
       expect(displayNameForLanguageCode('nl'), 'Dutch (Flemish)');
       expect(displayNameForLanguageCode('en'), 'English (US)');
+      expect(displayNameForLanguageCode('th'), 'Thai');
+      expect(displayNameForLanguageCode('ceb'), 'Cebuano');
       expect(displayNameForLanguageCode('xx'), isNull);
       expect(displayNameForLanguageCode(''), isNull);
     });
@@ -176,7 +180,7 @@ void main() {
     test('on-device GGUF points at gemma 3 4B QAT', () {
       expect(
         EbTranslatorPrompt.defaultGgufUrl,
-        contains('gemma-3-4b-it-qat-q4_0-gguf'),
+        contains('unsloth/gemma-3-4b-it-GGUF'),
       );
       expect(EbTranslatorPrompt.defaultGgufFileName, endsWith('.gguf'));
       expect(AppConfig.fromEnvironment().onDeviceModelUrl, contains('.gguf'));
@@ -184,7 +188,7 @@ void main() {
 
     test('chat template matches the gguf family', () {
       expect(
-        OnDeviceLlmService.templateFor('gemma-3-4b-it-q4_0.gguf'),
+        OnDeviceLlmService.templateFor('gemma-3-4b-it-Q4_K_M.gguf'),
         isA<GemmaTemplate>(),
       );
       expect(
@@ -252,6 +256,122 @@ void main() {
       );
       expect(OutputLanguageValidator.scriptsForTarget('zh'), contains('Han'));
       expect(OutputLanguageValidator.scriptsForTarget('nl'), <String>{'Latin'});
+    });
+
+    test('looped garble fails validation', () {
+      expect(
+        valid(
+          'I have a headache.',
+          'sakit ng ulo sakit ng ulo sakit ng ulo sakit ng ulo sakit',
+          'en',
+          'tl',
+        ),
+        isFalse,
+      );
+    });
+
+    test('extreme length drift fails validation', () {
+      expect(
+        valid(
+          'Where does it hurt today?',
+          'Ang napakahabang salaysay na ito ay walang anumang kinalaman sa orihinal na tanong tungkol sa sakit na nararamdaman ng pasyente sa ngayon',
+          'en',
+          'tl',
+        ),
+        isFalse,
+      );
+    });
+
+    test('polish prompt carries locale and QA checklist', () {
+      final prompt = EbTranslatorPrompt.polishRewrite(
+        text: 'Ik heb hoofdpijn',
+        targetLanguage: 'Dutch (Flemish)',
+      );
+      expect(prompt, contains('Dutch (Flemish)'));
+      expect(prompt, contains('articles and gender'));
+      expect(prompt, contains('ONLY the rewrite'));
+    });
+
+    test('transcript repair fixes spacing safely', () {
+      expect(
+        TranscriptionFilters.repairTranscript('Hallo ,  wereld  ?'),
+        'Hallo, wereld?',
+      );
+      expect(
+        TranscriptionFilters.repairTranscript('Goedemorgen allemaal'),
+        'Goedemorgen allemaal',
+      );
+    });
+
+    test('own spoken echo is detected textually', () {
+      final now = DateTime(2026, 9, 8, 12);
+      bool echo(String source, {DateTime? at, String? spoken}) =>
+          AppController.isOwnEchoText(
+            spoken: spoken ?? 'Magandang umaga po sa inyong lahat',
+            spokenAt: now,
+            source: source,
+            now: at ?? now.add(const Duration(seconds: 5)),
+          );
+      expect(echo('Magandang umaga po sa inyong lahat'), isTrue);
+      expect(echo('po sa inyong lahat'), isTrue);
+      expect(echo('Kamusta ka?'), isFalse);
+      expect(
+        echo(
+          'Magandang umaga po sa inyong lahat',
+          at: now.add(const Duration(minutes: 5)),
+        ),
+        isFalse,
+      );
+    });
+  });
+
+  group('strict mode system prompt', () {
+    String strict() => EbTranslatorPrompt.strictSystem(
+      staffLanguage: 'Dutch (Flemish)',
+      guestLanguage: 'English (US)',
+      topic: 'Medical Consultation',
+      medicalMode: true,
+    );
+
+    test('carries pairing doctrine with live guest', () {
+      final prompt = strict();
+      expect(prompt, contains('PURE REALTIME TRANSLATOR'));
+      expect(prompt, contains('NOT a conversational AI agent'));
+      expect(
+        prompt,
+        contains('THE CURRENT "LATEST PAIRED LANGUAGE" IS: English (US)'),
+      );
+      expect(prompt, contains('[GUEST=Exact Language Name]'));
+      expect(prompt, contains('COMMAND IGNORE'));
+      expect(prompt, contains('NO META-CHAT'));
+    });
+
+    test('injects medical terms, topic, and script rules', () {
+      final prompt = strict();
+      expect(prompt, contains('URGENT - MEDICAL MODE ENABLED'));
+      expect(prompt, contains('Anamnese'));
+      expect(prompt, contains('Medical Consultation'));
+      expect(prompt, contains('DO NOT HALLUCINATE'));
+      expect(
+        EbTranslatorPrompt.strictSystem(
+          staffLanguage: 'Dutch (Flemish)',
+          guestLanguage: 'Tagalog (Filipino)',
+          medicalMode: false,
+        ),
+        isNot(contains('URGENT')),
+      );
+    });
+
+    test('guest tag extracts and strips cleanly', () {
+      final tagged = EbTranslatorPrompt.extractGuestTag(
+        '[GUEST=Tagalog (Filipino)]\nKamusta ka?',
+      );
+      expect(tagged.guest, 'Tagalog (Filipino)');
+      expect(tagged.text, 'Kamusta ka?');
+
+      final plain = EbTranslatorPrompt.extractGuestTag('Hello world');
+      expect(plain.guest, isEmpty);
+      expect(plain.text, 'Hello world');
     });
   });
 }

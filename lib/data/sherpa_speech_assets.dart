@@ -116,4 +116,15 @@ class SherpaSpeechAssets {
       minBytes: 50 * 1024 * 1024,
     );
   }
+
+  /// Silero VAD model (speech segmentation, all platforms, ~2 MB).
+  static ModelFileRef vadModel() {
+    return const ModelFileRef(
+      url:
+          'https://github.com/k2-fsa/sherpa-onnx/releases/download/'
+          'asr-models/silero_vad.onnx',
+      relativePath: 'sherpa-vad/silero_vad.onnx',
+      minBytes: 400 * 1024,
+    );
+  }
 }
